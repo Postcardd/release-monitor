@@ -1,7 +1,7 @@
 name: Monitor Repositories Release Updates
 
 permissions:
-  contents: write  # 允许写入，否则无法 push
+  contents: write
 
 on:
   schedule:
@@ -13,35 +13,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout current repo
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install dependencies
+      - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y jq curl
 
-      - name: Load stored versions
+      - name: Load versions
         id: load_versions
         run: |
+          mkdir -p data
           if [ ! -f data/release_versions.json ]; then
-            mkdir -p data
             echo "{}" > data/release_versions.json
           fi
-          echo "versions=$(cat data/release_versions.json | jq -c .)" >> $GITHUB_OUTPUT
+          echo "versions=$(jq -c . data/release_versions.json)" >> $GITHUB_OUTPUT
 
-      - name: Check repositories releases
+      - name: Check releases
         id: check
         run: |
           VERSIONS='${{ steps.load_versions.outputs.versions }}'
           echo "$VERSIONS" > versions.json
 
           UPDATED=false
-          MESSAGE="📢 *GitHub Release 更新通知*\n"
+          UPDATE_MSG=""
 
-          # ===== 监控的仓库列表（可自由增删） =====
+          # ===== 仓库列表 =====
           REPOS=(
             "OpenListTeam/OpenList"
             "dani-garcia/vaultwarden"
@@ -49,57 +49,60 @@ jobs:
             "cloudflare/cloudflared"
             "n8n-io/n8n"
           )
-          # =======================================
+          # ===================
 
           for REPO in "${REPOS[@]}"; do
-            echo "Checking release for $REPO ..."
+            echo "Checking $REPO ..."
 
-            API_URL="https://api.github.com/repos/$REPO/releases/latest"
-            LATEST_TAG=$(curl -s $API_URL | jq -r '.tag_name')
+            API="https://api.github.com/repos/$REPO/releases/latest"
+            TAG=$(curl -s $API | jq -r '.tag_name')
 
-            if [ "$LATEST_TAG" = "null" ]; then
+            if [ "$TAG" = "null" ]; then
               echo "No release found for $REPO"
               continue
             fi
 
-            STORED_TAG=$(jq -r --arg REPO "$REPO" '.[$REPO]' versions.json)
+            STORED=$(jq -r --arg REPO "$REPO" '.[$REPO]' versions.json)
 
-            if [ "$STORED_TAG" != "$LATEST_TAG" ]; then
-              echo "Release updated: $REPO -> $LATEST_TAG"
-              UPDATED=true
-
-              MESSAGE+="\n📦 *$REPO*\n最新版本：*$LATEST_TAG*\n"
-
-              jq --arg REPO "$REPO" --arg TAG "$LATEST_TAG" '.[$REPO] = $TAG' versions.json > tmp.json
+            # 初次运行，仅记录不视为更新
+            if [ "$STORED" = "null" ]; then
+              jq --arg REPO "$REPO" --arg TAG "$TAG" '.[$REPO] = $TAG' versions.json > tmp.json
               mv tmp.json versions.json
-            else
-              echo "No update for $REPO"
+              echo "First record for $REPO"
+              continue
+            fi
+
+            # 检测更新
+            if [ "$STORED" != "$TAG" ]; then
+              UPDATED=true
+              UPDATE_MSG+="\n🔄 $REPO 更新：*$STORED* → *$TAG*"
+
+              jq --arg REPO "$REPO" --arg TAG "$TAG" '.[$REPO] = $TAG' versions.json > tmp.json
+              mv tmp.json versions.json
             fi
           done
 
           echo "updated=$UPDATED" >> $GITHUB_OUTPUT
-          echo "message=$MESSAGE" >> $GITHUB_OUTPUT
+          echo "update_msg=$UPDATE_MSG" >> $GITHUB_OUTPUT
 
-      - name: Save updated versions
-        if: steps.check.outputs.updated == 'true'
+      - name: Save version file
         run: |
           cp versions.json data/release_versions.json
 
-      - name: Commit updated version file
-        if: steps.check.outputs.updated == 'true'
+      - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/release_versions.json
-          git commit -m "Update release versions"
-          git push
+          git commit -m "Update release versions" || echo "No changes to commit"
+          git push || echo "No changes to push"
 
-      - name: Send PushPlus notification
+      - name: Send PushPlus (only if updated)
         if: steps.check.outputs.updated == 'true'
         run: |
-          PUSHPLUS_TOKEN=${{ secrets.PUSHPLUS_TOKEN }}
-          MESSAGE="${{ steps.check.outputs.message }}"
+          TOKEN=${{ secrets.PUSHPLUS_TOKEN }}
+          MESSAGE="${{ steps.check.outputs.update_msg }}"
 
           curl -X POST -H "Content-Type: application/json" \
-            -d "{\"token\":\"$PUSHPLUS_TOKEN\", \"title\":\"GitHub Release 更新\", \"content\":\"$MESSAGE\"}" \
+            -d "{\"token\":\"$TOKEN\",\"title\":\"GitHub Release 更新\",\"content\":\"$MESSAGE\"}" \
             https://www.pushplus.plus/send
