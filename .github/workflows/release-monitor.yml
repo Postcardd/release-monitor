@@ -1,0 +1,100 @@
+name: Monitor Repositories Release Updates
+
+on:
+  schedule:
+    - cron: "0 0,12 * * *"
+  workflow_dispatch:
+
+jobs:
+  check-releases:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl
+
+      - name: Load stored versions
+        id: load_versions
+        run: |
+          if [ ! -f data/release_versions.json ]; then
+            echo "{}" > data/release_versions.json
+          fi
+          echo "versions=$(cat data/release_versions.json | jq -c .)" >> $GITHUB_OUTPUT
+
+      - name: Check repositories releases
+        id: check
+        run: |
+          VERSIONS='${{ steps.load_versions.outputs.versions }}'
+          echo "$VERSIONS" > versions.json
+
+          UPDATED=false
+          MESSAGE="📢 *GitHub Release 更新通知*\n"
+
+          # ===== 要监控的仓库列表 =====
+          REPOS=(
+            "OpenListTeam/OpenList"
+            "dani-garcia/vaultwarden"
+            "bitwarden/android"
+            "cloudflare/cloudflared"
+            "n8n-io/n8n"
+          )
+          # ============================
+
+          for REPO in "${REPOS[@]}"; do
+            echo "Checking release for $REPO ..."
+
+            API_URL="https://api.github.com/repos/$REPO/releases/latest"
+            LATEST_TAG=$(curl -s $API_URL | jq -r '.tag_name')
+
+            if [ "$LATEST_TAG" = "null" ]; then
+              echo "No release found for $REPO"
+              continue
+            fi
+
+            STORED_TAG=$(jq -r --arg REPO "$REPO" '.[$REPO]' versions.json)
+
+            if [ "$STORED_TAG" != "$LATEST_TAG" ]; then
+              echo "Release updated: $REPO -> $LATEST_TAG"
+              UPDATED=true
+              MESSAGE+="\n📦 *$REPO*\n最新版本：*$LATEST_TAG*\n"
+
+              # 保存新的 Tag
+              jq --arg REPO "$REPO" --arg TAG "$LATEST_TAG" '.[$REPO] = $TAG' versions.json > tmp.json
+              mv tmp.json versions.json
+            else
+              echo "No release update for $REPO"
+            fi
+          done
+
+          echo "updated=$UPDATED" >> $GITHUB_OUTPUT
+          echo "message=$MESSAGE" >> $GITHUB_OUTPUT
+
+      - name: Save updated versions
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          mkdir -p data
+          cp versions.json data/release_versions.json
+
+      - name: Commit updated version file
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/release_versions.json
+          git commit -m "Update release versions"
+          git push
+
+      - name: Send PushPlus notification
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          PUSHPLUS_TOKEN=${{ secrets.PUSHPLUS_TOKEN }}
+          MESSAGE="${{ steps.check.outputs.message }}"
+
+          curl -X POST -H "Content-Type: application/json" \
+            -d "{\"token\":\"$PUSHPLUS_TOKEN\", \"title\":\"GitHub Release 更新\", \"content\":\"$MESSAGE\"}" \
+            https://www.pushplus.plus/send
