@@ -18,30 +18,17 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install tools
+      - name: Prepare version directory
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq curl
-
-      - name: Load versions
-        id: load_versions
-        run: |
-          mkdir -p data
-          if [ ! -f data/release_versions.json ]; then
-            echo "{}" > data/release_versions.json
-          fi
-          echo "versions=$(jq -c . data/release_versions.json)" >> $GITHUB_OUTPUT
+          mkdir -p data/versions
 
       - name: Check releases
         id: check
         run: |
-          VERSIONS='${{ steps.load_versions.outputs.versions }}'
-          echo "$VERSIONS" > versions.json
-
           UPDATED=false
           UPDATE_MSG=""
 
-          # ===== 仓库列表 =====
+          # ====== 需要监控的仓库列表 ======
           REPOS=(
             "OpenListTeam/OpenList"
             "dani-garcia/vaultwarden"
@@ -49,60 +36,58 @@ jobs:
             "cloudflare/cloudflared"
             "n8n-io/n8n"
           )
-          # ===================
+          # =================================
 
           for REPO in "${REPOS[@]}"; do
-            echo "Checking $REPO ..."
+            FILE="data/versions/${REPO//\//_}.txt"
 
             API="https://api.github.com/repos/$REPO/releases/latest"
-            TAG=$(curl -s $API | jq -r '.tag_name')
+            TAG=$(curl -s "$API" | jq -r '.tag_name')
 
-            if [ "$TAG" = "null" ]; then
-              echo "No release found for $REPO"
+            if [ "$TAG" = "null" ] || [ -z "$TAG" ]; then
+              echo "No release for $REPO"
               continue
             fi
 
-            STORED=$(jq -r --arg REPO "$REPO" '.[$REPO]' versions.json)
-
-            # 初次运行，仅记录不视为更新
-            if [ "$STORED" = "null" ]; then
-              jq --arg REPO "$REPO" --arg TAG "$TAG" '.[$REPO] = $TAG' versions.json > tmp.json
-              mv tmp.json versions.json
-              echo "First record for $REPO"
+            # 如果文件不存在 → 创建（初次记录，不算更新）
+            if [ ! -f "$FILE" ]; then
+              echo "$TAG" > "$FILE"
+              echo "Initial version recorded for $REPO: $TAG"
               continue
             fi
 
-            # 检测更新
-            if [ "$STORED" != "$TAG" ]; then
-              UPDATED=true
-              UPDATE_MSG+="\n🔄 $REPO 更新：*$STORED* → *$TAG*"
+            # 读取已记录的版本
+            STORED=$(cat "$FILE")
 
-              jq --arg REPO "$REPO" --arg TAG "$TAG" '.[$REPO] = $TAG' versions.json > tmp.json
-              mv tmp.json versions.json
+            # 没变化 → 跳过，无通知
+            if [ "$STORED" = "$TAG" ]; then
+              continue
             fi
+
+            # 有变化 → 更新版本 + 准备通知
+            echo "$TAG" > "$FILE"
+            UPDATED=true
+            UPDATE_MSG+="\n🔄 $REPO：*$STORED* → *$TAG*"
           done
 
           echo "updated=$UPDATED" >> $GITHUB_OUTPUT
           echo "update_msg=$UPDATE_MSG" >> $GITHUB_OUTPUT
 
-      - name: Save version file
-        run: |
-          cp versions.json data/release_versions.json
-
-      - name: Commit changes
+      - name: Commit updated version files
+        if: steps.check.outputs.updated == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/release_versions.json
-          git commit -m "Update release versions" || echo "No changes to commit"
-          git push || echo "No changes to push"
+          git add data/versions
+          git commit -m "Update release versions"
+          git push
 
-      - name: Send PushPlus (only if updated)
+      - name: Send PushPlus Notification
         if: steps.check.outputs.updated == 'true'
         run: |
           TOKEN=${{ secrets.PUSHPLUS_TOKEN }}
-          MESSAGE="${{ steps.check.outputs.update_msg }}"
+          MSG="${{ steps.check.outputs.update_msg }}"
 
           curl -X POST -H "Content-Type: application/json" \
-            -d "{\"token\":\"$TOKEN\",\"title\":\"GitHub Release 更新\",\"content\":\"$MESSAGE\"}" \
+            -d "{\"token\":\"$TOKEN\",\"title\":\"GitHub Release 更新\",\"content\":\"$MSG\"}" \
             https://www.pushplus.plus/send
