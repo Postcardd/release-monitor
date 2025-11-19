@@ -18,55 +18,98 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Ensure version directory
+      - name: Install GNU Parallel
+        run: sudo apt-get update && sudo apt-get install -y parallel
+
+      - name: Ensure directories
         run: |
           mkdir -p data/versions
+          mkdir -p tmp_msgs # 创建临时目录用于存放并发任务的日志
 
-      - name: Check releases
+      - name: Check releases (Parallel)
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          UPDATED=false
-          UPDATE_MSG=""
+          # === 1. 准备工作 ===
+          CONFIG_FILE="repos.txt"
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "❌ Error: $CONFIG_FILE not found!"
+            exit 1
+          fi
 
-          REPOS=(
-            "OpenListTeam/OpenList"
-            "dani-garcia/vaultwarden"
-            "bitwarden/android"
-            "cloudflare/cloudflared"
-            "n8n-io/n8n"
-          )
+          # === 2. 定义核心检查函数 (将被并发调用) ===
+          # 注意：Bash 函数内部无法直接修改父进程变量，所以我们把更新消息写入 tmp_msgs 目录
+          check_repo_func() {
+            repo=$(echo "$1" | xargs) # 去除空格
+            [ -z "$repo" ] && return  # 空行跳过
 
-          for REPO in "${REPOS[@]}"; do
-            FILE="data/versions/${REPO//\//_}.txt"
+            # 定义文件路径
+            file_path="data/versions/${repo//\//_}.txt"
+            # 临时消息文件，使用 base64 编码文件名避免特殊字符问题
+            msg_file="tmp_msgs/$(echo "$repo" | base64).msg"
 
-            API="https://api.github.com/repos/$REPO/releases/latest"
-            TAG=$(curl -s "$API" | jq -r '.tag_name')
+            # 请求 API
+            api_url="https://api.github.com/repos/$repo/releases/latest"
+            # 增加 --fail 避免 404 产生错误输出，增加 --max-time 防止卡死
+            tag=$(curl -s --fail --max-time 10 -H "Authorization: Bearer $GH_TOKEN" "$api_url" | jq -r '.tag_name')
 
-            if [ "$TAG" = "null" ] || [ -z "$TAG" ]; then
-              echo "No release for $REPO"
-              continue
+            if [ "$tag" = "null" ] || [ -z "$tag" ]; then
+              echo "⚠️ No release/error for $repo"
+              return
             fi
 
-            # 如果文件不存在 → 创建并标记为更新
-            if [ ! -f "$FILE" ]; then
-              echo "$TAG" > "$FILE"
-              echo "Initial version recorded for $REPO: $TAG"
-              UPDATED=true
-              UPDATE_MSG+="\n📦 $REPO：初次记录 *$TAG*"
-              continue
+            # A. 初次记录
+            if [ ! -f "$file_path" ]; then
+              echo "$tag" > "$file_path"
+              echo "✅ Initial: $repo -> $tag"
+              echo "📦 $repo：初次记录 <b>$tag</b>" > "$msg_file"
+              return
             fi
 
-            STORED=$(cat "$FILE")
-
-            if [ "$STORED" != "$TAG" ]; then
-              echo "$TAG" > "$FILE"
-              UPDATED=true
-              UPDATE_MSG+="\n🔄 $REPO：*$STORED* → *$TAG*"
+            # B. 检查更新
+            stored=$(cat "$file_path")
+            if [ "$stored" != "$tag" ]; then
+              echo "$tag" > "$file_path"
+              echo "🔄 Updated: $repo ($stored -> $tag)"
+              echo "🔄 $repo：$stored → <b>$tag</b>" > "$msg_file"
+            else
+              echo "⏹️ No change: $repo"
             fi
-          done
+          }
+          
+          # 导出函数和变量供 parallel 使用
+          export -f check_repo_func
+          export GH_TOKEN
 
+          # === 3. 并发执行 ===
+          echo "🚀 Starting parallel checks..."
+          # -j 10: 同时运行 10 个任务
+          # --bar: 显示进度条
+          cat "$CONFIG_FILE" | tr -d '\r' | grep -vE '^\s*#|^\s*$' | parallel -j 10 --bar check_repo_func {}
+
+          # === 4. 汇总结果 ===
+          # 检查 tmp_msgs 目录下是否有文件，有说明有更新
+          if [ "$(ls -A tmp_msgs)" ]; then
+            UPDATED=true
+            # 将所有消息文件合并，并添加换行符
+            UPDATE_MSG=$(cat tmp_msgs/*.msg | awk '{print $0"\\n"}')
+            echo "Updates detected."
+          else
+            UPDATED=false
+            UPDATE_MSG=""
+            echo "No updates detected."
+          fi
+
+          # === 5. 输出到 GitHub Actions ===
           echo "updated=$UPDATED" >> $GITHUB_OUTPUT
-          echo "update_msg=$UPDATE_MSG" >> $GITHUB_OUTPUT
+          
+          DELIMITER=$(openssl rand -hex 8)
+          {
+            echo "update_msg<<$DELIMITER"
+            echo -e "$UPDATE_MSG"
+            echo "$DELIMITER"
+          } >> $GITHUB_OUTPUT
 
       - name: Commit version files
         if: steps.check.outputs.updated == 'true'
@@ -74,15 +117,23 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/versions
-          git commit -m "Initial or updated release versions"
+          git diff-index --quiet HEAD || git commit -m "chore: update release versions (auto)"
           git push
 
       - name: Send PushPlus Notification
         if: steps.check.outputs.updated == 'true'
+        env:
+          TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          MSG: ${{ steps.check.outputs.update_msg }}
         run: |
-          TOKEN=${{ secrets.PUSHPLUS_TOKEN }}
-          MSG="${{ steps.check.outputs.update_msg }}"
+          # 构建 JSON
+          PAYLOAD=$(jq -n \
+            --arg token "$TOKEN" \
+            --arg title "GitHub Release 更新" \
+            --arg content "$MSG" \
+            --arg template "html" \
+            '{token: $token, title: $title, content: $content, template: $template}')
 
           curl -X POST -H "Content-Type: application/json" \
-            -d "{\"token\":\"$TOKEN\",\"title\":\"GitHub Release 更新\",\"content\":\"$MSG\"}" \
+            -d "$PAYLOAD" \
             https://www.pushplus.plus/send
