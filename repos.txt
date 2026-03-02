@@ -3,3 +3,6 @@ dani-garcia/vaultwarden
 bitwarden/android
 cloudflare/cloudflared
 n8n-io/n8n
+bia-pain-bache/BPB-Worker-Panel
+clash-verge-rev/clash-verge-rev
+MetaCubeX/ClashMetaForAndroid
