@@ -6,3 +6,5 @@ n8n-io/n8n
 bia-pain-bache/BPB-Worker-Panel
 clash-verge-rev/clash-verge-rev
 MetaCubeX/ClashMetaForAndroid
+stackia/rtp2httpd
+j4Uq/TVBoxOSC
