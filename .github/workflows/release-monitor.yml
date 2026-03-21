@@ -87,8 +87,7 @@ jobs:
           # === 3. 并发执行 ===
           echo "🚀 Starting parallel checks..."
           # -j 10: 同时运行 10 个任务
-          # --bar: 显示进度条
-          cat "$CONFIG_FILE" | tr -d '\r' | grep -vE '^\s*#|^\s*$' | parallel -j 10 --bar check_repo_func {}
+          cat "$CONFIG_FILE" | tr -d '\r' | grep -vE '^\s*#|^\s*$' | parallel -j 10 check_repo_func {}
 
           # === 4. 汇总结果 ===
           # 检查 tmp_msgs 目录下是否有文件，有说明有更新
